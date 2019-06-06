@@ -9,18 +9,15 @@ require 'logger'
 @logger = Logger.new('qbt_pia.log', 10, 1024000)
 config = YAML.load_file("config.yml")
 
-# add your qbt credentials and ip address here
 QBT_USERNAME = config[:qbt_username].freeze
 QBT_PASSWORD = config[:qbt_password].freeze
 QBT_ADDR = config[:qbt_addr].freeze # ex. http://10.0.1.48:8080
 
-# add your pia credentials here
 PIA_USERNAME = config[:pia_username].freeze
 PIA_PASSWORD = config[:pia_password].freeze
 PIA_LOCAL_IP = Socket.getifaddrs.detect {|intf| !intf.addr.nil? && intf.addr.ip? && !intf.addr.ipv6? && intf.name.include?("tun")}.addr.ip_address
 
-# days until you get a new port
-DAYS_TO_KEEP_PORT = 3
+DAYS_TO_KEEP_PORT = config[:days_to_keep_port].freeze
 
 def create_new_client_id_file
   @pia_client_id = SecureRandom.hex(32)
