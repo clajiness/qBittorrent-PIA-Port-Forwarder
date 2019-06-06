@@ -7,15 +7,16 @@ require 'yaml'
 require 'logger'
 
 @logger = Logger.new('qbt_pia.log', 10, 1024000)
+config = YAML.load_file("config.yml")
 
 # add your qbt credentials and ip address here
-QBT_USERNAME = "".freeze
-QBT_PASSWORD = "".freeze
-QBT_ADDR = "".freeze # ex. http://10.0.1.48:8080
+QBT_USERNAME = config[:qbt_username].freeze
+QBT_PASSWORD = config[:qbt_password].freeze
+QBT_ADDR = config[:qbt_addr].freeze # ex. http://10.0.1.48:8080
 
 # add your pia credentials here
-PIA_USERNAME = "".freeze
-PIA_PASSWORD = "".freeze
+PIA_USERNAME = config[:pia_username].freeze
+PIA_PASSWORD = config[:pia_password].freeze
 PIA_LOCAL_IP = Socket.getifaddrs.detect {|intf| !intf.addr.nil? && intf.addr.ip? && !intf.addr.ipv6? && intf.name.include?("tun")}.addr.ip_address
 
 # days until you get a new port
@@ -30,13 +31,13 @@ def create_new_client_id_file
 end
 
 if File.exist?("client_id.yml")
-  config = YAML.load_file("client_id.yml")
-  created = config[:created]
+  client_id_config = YAML.load_file("client_id.yml")
+  created = client_id_config[:created]
 
   if (Time.now - created) > (60 * 60 * 24 * DAYS_TO_KEEP_PORT)
     create_new_client_id_file
   else
-    @pia_client_id = config[:client_id]
+    @pia_client_id = client_id_config[:client_id]
   end
 else
   create_new_client_id_file
