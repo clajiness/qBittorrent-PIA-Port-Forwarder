@@ -1,5 +1,7 @@
 # qBittorrent-PIA-Port-Forwarder
 
+## Deprecated - This script will *not* work with PIA's NextGen network.
+
 ### A Ruby script for automatically setting qBittorrents listening port while connected to PIA VPN
 
 **Config**\
