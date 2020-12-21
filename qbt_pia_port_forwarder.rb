@@ -5,108 +5,199 @@ require 'securerandom'
 require 'socket'
 require 'yaml'
 require 'logger'
+require 'base64'
 
+# version number of qppf
+script_version = "2.0.1"
+
+# set up logger
 @logger = Logger.new('qbt_pia.log', 10, 1024000)
-config = YAML.load_file("config.yml")
+@logger.info("starting qbt_pia_port_forwarder v#{script_version}")
 
-QBT_USERNAME = config[:qbt_username].freeze
-QBT_PASSWORD = config[:qbt_password].freeze
-QBT_ADDR = config[:qbt_addr].freeze # ex. http://10.0.1.48:8080
-
-PIA_USERNAME = config[:pia_username].freeze
-PIA_PASSWORD = config[:pia_password].freeze
-PIA_LOCAL_IP = Socket.getifaddrs.detect {|intf| !intf.addr.nil? && intf.addr.ip? && !intf.addr.ipv6? && intf.name.include?("tun")}.addr.ip_address
-
-DAYS_TO_KEEP_PORT = config[:days_to_keep_port].freeze
-
-def create_new_client_id_file
-  @pia_client_id = SecureRandom.hex(32)
-  File.open("client_id.yml", "w") do |out|
-    client_id = {:client_id => @pia_client_id, :created => Time.now}
-    YAML.dump(client_id, out)
-  end
+# HELPERS
+def is_expired?(time_stamp)
+  time_stamp == nil || time_stamp <= Time.now
 end
+# ----------
 
-if File.exist?("client_id.yml")
-  client_id_config = YAML.load_file("client_id.yml")
-  created = client_id_config[:created]
+def write_config
+  File.open("auto_config.yml", "w") { |f| f.write @config.to_yaml }
+end
+# ----------
 
-  if (Time.now - created) > (60 * 60 * 24 * DAYS_TO_KEEP_PORT)
-    create_new_client_id_file
-  else
-    @pia_client_id = client_id_config[:client_id]
+# CONFIG
+def get_config
+  begin
+    @pia_local_ip = `ip route | head -1 | grep tun | awk '{ print $3 }'`.chomp
+    @logger.info("local ip is #{@pia_local_ip}")
+  rescue
+    @logger.error("PIA_LOCAL_IP not found")
+    exit(false)
   end
-else
-  create_new_client_id_file
+
+  if File.exist?("auto_config.yml")
+    config_file = YAML.load_file("auto_config.yml")
+    @logger.info("auto_config.yml file found successfully")
+
+    @config = {
+      user: config_file[:user],
+      password: config_file[:password],
+      token: config_file[:token],
+      token_expiration: config_file[:token_expiration],
+      port: config_file[:port],
+      port_expiration: config_file[:port_expiration],
+      port_renew_by: config_file[:port_renew_by],
+      payload: config_file[:payload],
+      signature: config_file[:signature],
+      qbit_user: config_file[:qbit_user],
+      qbit_pass: config_file[:qbit_pass],
+      qbit_addr: config_file[:qbit_addr]
+    }
+  else
+    config_file = YAML.load_file("initial_config.yml")
+    @logger.info("auto_config.yml file not found. load data from the initial_config.yml file.")
+
+    @config = {
+      user: config_file[:pia_username],
+      password: config_file[:pia_password],
+      token: nil,
+      token_expiration: nil,
+      port: nil,
+      port_expiration: nil,
+      port_renew_by: nil,
+      payload: nil,
+      signature: nil,
+      qbit_user: config_file[:qbt_username],
+      qbit_pass: config_file[:qbt_password],
+      qbit_addr: config_file[:qbt_addr]
+    }
+  end
 end
 # ----------
 
 # PIA METHODS
-def port_forward_assignment
-  uri = URI("https://www.privateinternetaccess.com/vpninfo/port_forward_assignment?user=#{PIA_USERNAME}&pass=#{PIA_PASSWORD}&client_id=#{@pia_client_id}&local_ip=#{PIA_LOCAL_IP}")
-  http = Net::HTTP.new(uri.host, uri.port)
-  http.use_ssl = true
-  http.verify_mode = OpenSSL::SSL::VERIFY_PEER
-  req =  Net::HTTP::Post.new(uri)
-  http.request(req)
-rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+def get_pia_token
+  if is_expired?(@config[:token_expiration])
+    uri = URI('https://10.0.0.1/authv3/generateToken')
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    req =  Net::HTTP::Get.new(uri)
+    req.basic_auth "#{@config[:user]}", "#{@config[:password]}"
+    response = http.request(req)
+    response_body = JSON.parse(response.body)
+    @config[:token] = response_body["token"]
+    @config[:token_expiration] = (Time.now + (60 * 60 * 24)) # set token expiration to 24 hours
+    @logger.info("new pia token has been created")
+  else
+    @logger.info("using existing pia token")
+  end
+end
+
+def get_pia_port
+  if is_expired?(@config[:port_expiration]) and is_expired?(@config[:port_renew_by])
+    response = `curl -skG --data-urlencode "token=#{@config[:token]}" "https://#{@pia_local_ip}:19999/getSignature"`
+    sig = JSON.parse(response)
+    @config[:payload] = sig["payload"]
+    @config[:signature] = sig["signature"]
+    payload = JSON.parse(Base64.decode64(@config[:payload]))
+    @config[:port] = payload["port"]
+    @config[:port_expiration] = (Time.now + (60 * 60 * 24 * 30)) # set port expiration to 30 days
+    @logger.info("new pia port has been created")
+  else
+    @logger.info("using existing pia port")
+  end
+end
+
+def bind_port
+  response = `curl -skG --data-urlencode "payload=#{@config[:payload]}" --data-urlencode "signature=#{@config[:signature]}" "https://#{@pia_local_ip}:19999/bindPort"`
+  parsed_response = JSON.parse(response)
+
+  if parsed_response["status"] == "OK"
+    @logger.info("pia's bind port api response: #{JSON.parse(response)}")
+    @config[:port_renew_by] = Time.now + (60 * 16) # set port renewal timing to 16 minutes since this runs every 15
+  else
+    @logger.error("error binding port: #{parsed_response["message"]} - exiting")
+    invalidate_expirations
+    exit(false)
+  end
+end
+
+def invalidate_expirations
+  config[:token_expiration] = nil
+  config[:port_expiration] = nil
+  config[:port_renew_by] = nil
 end
 # ----------
 
 # QBITTORRENT METHODS
 def qbt_auth_login
-  uri = URI("#{QBT_ADDR}/api/v2/auth/login?username=#{QBT_USERNAME}&password=#{QBT_PASSWORD}")
+  uri = URI("#{@config[:qbit_addr]}/api/v2/auth/login?username=#{@config[:qbit_user]}&password=#{@config[:qbit_pass]}")
   http = Net::HTTP.new(uri.host, uri.port)
   req =  Net::HTTP::Get.new(uri)
-  http.request(req)
+  response = http.request(req)
+  response["set-cookie"].split(";")[0]
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_auth_login - HTTP Request failed - (#{e.message})")
 end
 
 def qbt_app_preferences(sid)
-  uri = URI("#{QBT_ADDR}/api/v2/app/preferences")
+  uri = URI("#{@config[:qbit_addr]}/api/v2/app/preferences")
   http = Net::HTTP.new(uri.host, uri.port)
   req =  Net::HTTP::Get.new(uri)
   req.add_field "Cookie", sid
-  http.request(req)
+  response = http.request(req)
+  qbt_port = JSON.parse(response.body)["listen_port"]
+  @logger.info("current qbit port: #{qbt_port}")
+  qbt_port
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_app_preferences - HTTP Request failed - (#{e.message})")
 end
 
 def qbt_app_setPreferences(sid, pia_port)
-  uri = URI("#{QBT_ADDR}/api/v2/app/setPreferences?json=%7B%22listen_port%22:%20#{pia_port}%7D")
+  uri = URI("#{@config[:qbit_addr]}/api/v2/app/setPreferences?json=%7B%22listen_port%22:%20#{pia_port}%7D")
   http = Net::HTTP.new(uri.host, uri.port)
   req =  Net::HTTP::Get.new(uri)
   req.add_field "Cookie", sid
   http.request(req)
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_app_setPreferences - HTTP Request failed - (#{e.message})")
 end
 # ----------
 
-# get sid from qbt
-sid = qbt_auth_login["set-cookie"].split(";")[0]
+# DO SOME WORK!
+# populate config hash
+get_config
 
-# get existing port from qbt
-qbt_port = JSON.parse(qbt_app_preferences(sid).body)["listen_port"]
-@logger.info("current qbt port: #{qbt_port}")
-puts "current qbt port: #{qbt_port}"
+# get pia token and port, and then bind port
+get_pia_token
+get_pia_port
+bind_port
 
-# get port from pia
-pia_port = JSON.parse(port_forward_assignment.body)["port"]
-@logger.info("pia port: #{pia_port}")
-puts "pia port: #{pia_port}"
+# get sid from qbit
+sid = qbt_auth_login
 
-# set new port in qbt
-if pia_port != qbt_port
-  response = qbt_app_setPreferences(sid, pia_port)
-  @logger.info("qbt port changed to #{pia_port} (response status: #{response.code}: #{response.message})")
-  puts "qbt port changed to #{pia_port} (response status: #{response.code}: #{response.message})"
+# get existing port from qbit
+qbt_port = qbt_app_preferences(sid)
+
+# if qbit port doesn't match the pia port, update qbit
+if qbt_port != @config[:port]
+  response = qbt_app_setPreferences(sid, @config[:port])
+  if response.code == "200"
+    @logger.info("qbit's port has been updated to #{@config[:port]}")
+  else
+    @logger.error("qbit's port was not updated")
+  end
 end
+# ----------
 
+
+# CLEAN HOUSE
+# write config hash to auto_config for the next run
+write_config
+
+# close out the logger
+@logger.info("qbt_pia_port_forwarder completed at #{Time.now}")
+@logger.info("----------------")
 @logger.close
+# ----------

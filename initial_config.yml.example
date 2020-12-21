@@ -1,0 +1,13 @@
+---
+# These values must be populated before the first run.
+# Subsequent runs will pull data from the auto_config.yml file.
+# If you make changes to any of this data, delete your auto_config.yml file and run the script again.
+
+# PIA username and password
+:pia_username: # pNNNNNNN
+:pia_password:
+
+# qBittorrent username, password, and address:port
+:qbt_username:
+:qbt_password:
+:qbt_addr: # ex. http://10.0.1.48:8080
