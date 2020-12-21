@@ -7,9 +7,12 @@ require 'yaml'
 require 'logger'
 require 'base64'
 
+# version number of qppf
+script_version = "2.0.1"
+
 # set up logger
 @logger = Logger.new('qbt_pia.log', 10, 1024000)
-@logger.info("Starting qbt_pia_port_forwarder v2.0.0")
+@logger.info("starting qbt_pia_port_forwarder v#{script_version}")
 
 # HELPERS
 def is_expired?(time_stamp)
@@ -34,6 +37,7 @@ def get_config
 
   if File.exist?("auto_config.yml")
     config_file = YAML.load_file("auto_config.yml")
+    @logger.info("auto_config.yml file found successfully")
 
     @config = {
       user: config_file[:user],
@@ -51,6 +55,7 @@ def get_config
     }
   else
     config_file = YAML.load_file("initial_config.yml")
+    @logger.info("auto_config.yml file not found. load data from the initial_config.yml file.")
 
     @config = {
       user: config_file[:pia_username],
@@ -83,8 +88,9 @@ def get_pia_token
     response_body = JSON.parse(response.body)
     @config[:token] = response_body["token"]
     @config[:token_expiration] = (Time.now + (60 * 60 * 24)) # set token expiration to 24 hours
+    @logger.info("new pia token has been created")
   else
-    @logger.info("Using existing token")
+    @logger.info("using existing pia token")
   end
 end
 
@@ -97,16 +103,24 @@ def get_pia_port
     payload = JSON.parse(Base64.decode64(@config[:payload]))
     @config[:port] = payload["port"]
     @config[:port_expiration] = (Time.now + (60 * 60 * 24 * 30)) # set port expiration to 30 days
-    @has_new_port = true
+    @logger.info("new pia port has been created")
   else
-    @logger.info("Using existing port")
+    @logger.info("using existing pia port")
   end
 end
 
 def bind_port
   response = `curl -skG --data-urlencode "payload=#{@config[:payload]}" --data-urlencode "signature=#{@config[:signature]}" "https://#{@pia_local_ip}:19999/bindPort"`
-  @logger.info(JSON.parse(response))
-  @config[:port_renew_by] = Time.now + (60 * 16) # set port renewal timing to 16 minutes since this runs every 15
+  parsed_response = JSON.parse(response)
+
+  if parsed_response["status"] == "OK"
+    @logger.info("pia's bind port api response: #{JSON.parse(response)}")
+    @config[:port_renew_by] = Time.now + (60 * 16) # set port renewal timing to 16 minutes since this runs every 15
+  else
+    @logger.error("error binding port: #{parsed_response["message"]} - exiting")
+    invalidate_expirations
+    exit(false)
+  end
 end
 
 def invalidate_expirations
@@ -124,8 +138,7 @@ def qbt_auth_login
   response = http.request(req)
   response["set-cookie"].split(";")[0]
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_auth_login - HTTP Request failed - (#{e.message})")
 end
 
 def qbt_app_preferences(sid)
@@ -135,11 +148,10 @@ def qbt_app_preferences(sid)
   req.add_field "Cookie", sid
   response = http.request(req)
   qbt_port = JSON.parse(response.body)["listen_port"]
-  @logger.info("current qbt port: #{qbt_port}")
+  @logger.info("current qbit port: #{qbt_port}")
   qbt_port
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_app_preferences - HTTP Request failed - (#{e.message})")
 end
 
 def qbt_app_setPreferences(sid, pia_port)
@@ -149,8 +161,7 @@ def qbt_app_setPreferences(sid, pia_port)
   req.add_field "Cookie", sid
   http.request(req)
 rescue StandardError => e
-  @logger.error("HTTP Request failed (#{e.message})")
-  puts "HTTP Request failed (#{e.message})"
+  @logger.error("qbt_app_setPreferences - HTTP Request failed - (#{e.message})")
 end
 # ----------
 
@@ -158,7 +169,7 @@ end
 # populate config hash
 get_config
 
-# pia stuff
+# get pia token and port, and then bind port
 get_pia_token
 get_pia_port
 bind_port
@@ -187,5 +198,6 @@ write_config
 
 # close out the logger
 @logger.info("qbt_pia_port_forwarder completed at #{Time.now}")
+@logger.info("----------------")
 @logger.close
 # ----------
