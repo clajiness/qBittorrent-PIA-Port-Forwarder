@@ -1,5 +1,3 @@
-## **V2 Beta**
-
 # qBittorrent-PIA-Port-Forwarder V2
 
 ### A Ruby script for automatically setting qBittorrents listening port while connected to PIA VPN
